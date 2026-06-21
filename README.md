@@ -2,7 +2,6 @@
 
 ![C++](https://img.shields.io/badge/C++-17-blue)
 ![LLVM](https://img.shields.io/badge/LLVM-Clang-orange)
-![Python](https://img.shields.io/badge/Python-3.8+-green)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red)
 
 A static analysis and optimization tool for C programs built with **C++** using **LLVM/Clang LibTooling**. The project parses C source code into a Control Flow Graph (CFG) and performs dataflow analysis, security auditing, and compiler optimizations, all visualized through an interactive **Python/Streamlit** dashboard.
