@@ -1,0 +1,17 @@
+# compiled c++ binaries and objects
+analyzer
+*.o
+
+# graphviz temp files
+*.dot
+*.svg
+*.png
+
+# python caches and streamlit files
+__pycache__/
+*.pyc
+.streamlit/
+
+# OS generated files
+.DS_Store
+Thumbs.db
