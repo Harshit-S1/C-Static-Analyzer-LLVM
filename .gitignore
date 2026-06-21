@@ -13,5 +13,6 @@ __pycache__/
 .streamlit/
 
 # OS generated files
+.vscode/
 .DS_Store
 Thumbs.db

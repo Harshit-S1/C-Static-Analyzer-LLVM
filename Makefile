@@ -14,14 +14,14 @@ CLANG_LIBS = -Wl,--start-group \
 
 all: analyzer
 
-# Step 2: Link the object file to create the final executable
+# linking the object file to create the final executable
 analyzer: CFGBuilder.o
 	$(CXX) CFGBuilder.o -o analyzer $(LLVM_LDFLAGS) $(CLANG_LIBS)
 
-# Step 1: Compile the C++ file into an object file
+# compiling the C++ file into an object file (the separation prevents recompilation)
 CFGBuilder.o: CFGBuilder.cpp
 	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -c CFGBuilder.cpp -o CFGBuilder.o
 
-# Cleanup now includes the .o file
+# cleanup now includes the .o file
 clean:
 	rm -f analyzer CFGBuilder.o temp.c optimized.c *_cfg.dot

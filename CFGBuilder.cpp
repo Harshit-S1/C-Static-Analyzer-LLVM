@@ -20,8 +20,10 @@ using namespace clang;
 using namespace clang::tooling;
 using namespace std;
 
+// a command line option category is setup for our tool
 static llvm::cl::OptionCategory MyToolCategory("Static Analyzer Options");
 
+// This is the main worker that walks through the C code's AST (Abstract Syntax Tree)
 class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 private:
     ASTContext *Context;
@@ -29,21 +31,23 @@ private:
     set<const FunctionDecl*> allFunctions;
     set<string> calledFunctions;
 
-    // --- PHASE 2 FIX: Stop Dataflow Pollution from Pointers/Arrays ---
+    //    To Stop Dataflow Pollution from Pointers/Arrays
+    // Tries to safely pull the variable name out of an expression
     string getVarName(Expr *E) {
         if (!E) return "";
         if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts())) {
             return DRE->getDecl()->getNameAsString();
         }
-        return ""; // Return empty string instead of "unknown" to prevent alias pollution
+        return ""; // returns empty string instead of "unknown" to prevent alias pollution
     }
 
-    // --- PHASE 2/3 FIX: Protect I/O, System Calls, and Increments ---
+    //    Protecting I/O, System Calls, and Increments
+    // Checks if a statement actually does something we can't safely delete
     bool hasSideEffects(const Stmt *S) {
         if (!S) return false;
         if (isa<CallExpr>(S)) return true;
         
-        // NEW: Catch state-mutating unary operators (x++, --y)
+        // catches state-mutating unary operators (x++, --y)
         if (const UnaryOperator *UO = dyn_cast<UnaryOperator>(S)) {
             if (UO->isIncrementDecrementOp()) return true;
         }
@@ -54,7 +58,8 @@ private:
         return false;
     }
 
-    // Helper: Evaluates arithmetic utilizing our dynamically tracked constants
+    // Helper to Evaluate arithmetic utilizing our dynamically tracked constants
+    // basically a mini-calculator to crunch the numbers if we know what the variables hold
     long long evaluateExpr(const Expr *E, map<string, long long> &vals, bool &isConst) {
         if (!E) { isConst = false; return 0; }
         E = E->IgnoreParenImpCasts();
@@ -73,19 +78,19 @@ private:
             if (lConst && rConst) {
                 isConst = true;
                 switch (BO->getOpcode()) {
-                    // Standard Arithmetic
+                    // standard arithmetic
                     case BO_Add: return lVal + rVal;
                     case BO_Sub: return lVal - rVal;
                     case BO_Mul: return lVal * rVal;
                     case BO_Div: return rVal != 0 ? lVal / rVal : 0;
                     case BO_Rem: return rVal != 0 ? lVal % rVal : 0;
                     
-                    // Bitwise Logical
+                    // bitwise logical
                     case BO_And: return lVal & rVal;
                     case BO_Or:  return lVal | rVal;
                     case BO_Xor: return lVal ^ rVal;
                     
-                    // Bitwise Shifts (Guarded against undefined behavior)
+                    // bitwise shifts (guarded against undefined behavior)
                     case BO_Shl: return (rVal >= 0 && rVal < 64) ? (lVal << rVal) : 0;
                     case BO_Shr: return (rVal >= 0 && rVal < 64) ? (lVal >> rVal) : 0;
                     
@@ -103,12 +108,13 @@ private:
         isConst = false; return 0;
     }
 
-    // Helper: Extracts variables that aren't already folded into constants
+    // Helper which extracts variables that aren't already folded into constants
+    // digs out all the real variables actively being used in a statement
     void extractActualUses(const Stmt *S, map<string, long long> &currentVals, set<string> &uses) {
         if (!S) return;
         
         if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(S)) {
-            // --- THE SAFE FIX: Ensure it is a Variable, not a Function (stops printf in Live Sets) ---
+            //    ensures it is a variable, not a function (stops printf in Live Sets)
             if (isa<VarDecl>(DRE->getDecl())) {
                 string name = DRE->getDecl()->getNameAsString();
                 if (currentVals.find(name) == currentVals.end()) {
@@ -119,11 +125,11 @@ private:
         for (const Stmt *child : S->children()) extractActualUses(child, currentVals, uses);
     }
 
-    // Helper: Replaces propagated constants dynamically on the right hand sides
+    // Helper to replace propagated constants dynamically on the right hand sides
+    // swaps out variable names with their actual hardcoded numbers in the source code
     void replaceDREs(const Stmt *S, map<string, long long> &vals, Rewriter &R) {
         if (!S) return;
         
-        // (Cleaned up: No UO_AddrOf hacks needed because Strict Amnesia protects us!)
         if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(S)) {
             if (BO->isAssignmentOp()) {
                 replaceDREs(BO->getRHS(), vals, R);
@@ -142,6 +148,7 @@ private:
 public:
     explicit MyASTVisitor(ASTContext *Context, Rewriter &R) : Context(Context), TheRewriter(R) {}
 
+    // keeps track of what functions are being called so we can delete unused ones later
     bool VisitCallExpr(CallExpr *CE) {
         if (FunctionDecl *FD = CE->getDirectCallee()) {
             calledFunctions.insert(FD->getNameAsString());
@@ -149,15 +156,15 @@ public:
         return true;
     }
 
+    // The main worker, this runs for every function definition it finds
     bool VisitFunctionDecl(FunctionDecl *Declaration) {
         if (!Declaration->hasBody()) return true;
-        // --- NEW CODE: System Header Filter ---
         SourceManager &SM = Context->getSourceManager();
         if (SM.isInSystemHeader(Declaration->getLocation()) || 
             !SM.isInMainFile(Declaration->getLocation())) {
-            return true; // Skip standard library and external header functions
+            return true; // to skip standard library and external header functions
         }
-        // --------------------------------------
+        
         if (Declaration->isThisDeclarationADefinition()) {
             allFunctions.insert(Declaration);
         }
@@ -165,7 +172,8 @@ public:
         string funcName = Declaration->getNameInfo().getAsString();
         llvm::outs() << "Analyzing Function: " << funcName << "\n";
 
-        // --- IMPROVEMENT 2: Maximize CFG Detail ---
+        // Maximizing CFG Detail 
+        // tells Clang to build the Control Flow Graph and give us all the main details
         CFG::BuildOptions Options;
         Options.AddImplicitDtors = true;
         Options.AddInitializers = true;
@@ -173,6 +181,7 @@ public:
         unique_ptr<CFG> functionCFG = CFG::buildCFG(Declaration, Declaration->getBody(), Context, Options);
         if (!functionCFG) return true;
 
+        // figures out which blocks can actually be reached (through standard BFS traversal)
         set<int> visitedBlocks;
         queue<CFGBlock*> q;
         q.push(&functionCFG->getEntry());
@@ -187,7 +196,8 @@ public:
             }
         }
 
-        // --- FIX 1: Restrict Dominators strictly to Reachable Blocks ---
+        //    Restricting Dominators strictly to Reachable Blocks
+        // Figures out Dominators (which block must run before another block)
         map<int, set<int>> dominators;
         set<int> allBlocks = visitedBlocks; 
         
@@ -201,14 +211,14 @@ public:
                 CFGBlock *block = *it;
                 int B = block->getBlockID();
                 
-                // Skip the Entry block AND completely ignore Unreachable blocks
+                // Skips the entry block and completely ignores unreachable blocks
                 if (B == entryID || visitedBlocks.find(B) == visitedBlocks.end()) continue;
 
                 set<int> newDom = allBlocks;
                 for (CFGBlock::pred_iterator predIt = block->pred_begin(); predIt != block->pred_end(); ++predIt) {
                     if (CFGBlock *pred = *predIt) {
                         int P = pred->getBlockID();
-                        // Only intersect with Reachable predecessors
+                        // Only intersect with reachable predecessors
                         if (visitedBlocks.find(P) != visitedBlocks.end()) {
                             set<int> intersection;
                             set_intersection(newDom.begin(), newDom.end(), dominators[P].begin(), dominators[P].end(), inserter(intersection, intersection.begin()));
@@ -224,10 +234,10 @@ public:
         map<int, set<string>> useLiveSets, defLiveSets;
         map<const Stmt*, set<string>> stmtUsesMap; 
 
-        // --- NEW FIX: Track global usage ---
+        //    Track global usage
         set<string> everUsedVars;
 
-        // PASS 1: FORWARD - Constant Folding and Local Constant Propagation
+        // pass 1: (forward) - Constant Folding and Local Constant Propagation
         // Note: This is strictly Local Constant Propagation (resets per basic block).
         // Safely implementing Global Constant Propagation across branches/loops requires 
         // converting the graph to SSA (Static Single Assignment) form first.
@@ -236,7 +246,7 @@ public:
             CFGBlock *block = *blockIt;
             if (visitedBlocks.find(block->getBlockID()) == visitedBlocks.end()) continue;
 
-            // --- THE FIX: Isolate the constants to the current block ---
+            //    isolating the constants to the current block
             map<string, long long> localConsts;
 
             for (CFGBlock::iterator elemIt = block->begin(); elemIt != block->end(); ++elemIt) {
@@ -244,7 +254,7 @@ public:
                     const Stmt *stmt = cfgStmt->getStmt();
                     set<string> aUses;
                     
-                    // --- THE FIX: Wipe local knowledge if state mutates unpredictably ---
+                    //    wiping local knowledge if state mutates unpredictably
                     if (hasSideEffects(stmt)) {
                         localConsts.clear(); 
                     }
@@ -253,7 +263,7 @@ public:
                         if (BO->isAssignmentOp()) {
                             string lhsName = getVarName(BO->getLHS());
                             
-                            // --- THE FIX: Strictly evaluate standard '=' assignments ---
+                            //    strictly evaluating the standard '=' assignments
                             if (BO->getOpcode() == BO_Assign) {
                                 bool isConst = false;
                                 long long val = evaluateExpr(BO->getRHS(), localConsts, isConst);
@@ -265,15 +275,15 @@ public:
                                     extractActualUses(BO->getRHS(), localConsts, aUses);
                                     replaceDREs(BO->getRHS(), localConsts, TheRewriter);
                                 }
-                                // --- NEW FIX: Protect Arrays from DCE ---
+                                //    Protecting Arrays from DCE 
                                 // If lhsName is empty, it means this is NOT a simple scalar assignment (like x = 5).
                                 // It is an ArraySubscript (arr[y] = 5) or Pointer Dereference (*p = 5).
-                                // In these cases, the variables on the left side are actively USED to compute the memory address!
+                                // In these cases, the variables on the left side are actively used to compute the memory address!
                                 if (lhsName.empty()) {
                                     extractActualUses(BO->getLHS(), localConsts, aUses);
                                 }
                             } else {
-                                // It is a compound assignment (+=, -=). The value changed, so we must erase it!
+                                // It is a compound assignment (+=, -=), The value changed, so it must be erased
                                 localConsts.erase(lhsName);
                                 extractActualUses(stmt, localConsts, aUses);
                                 replaceDREs(stmt, localConsts, TheRewriter);
@@ -304,12 +314,13 @@ public:
                         extractActualUses(stmt, localConsts, aUses);
                         replaceDREs(stmt, localConsts, TheRewriter);
                     }
-                    stmtUsesMap[stmt] = aUses; // Save accurate un-folded uses for DCE later
+                    stmtUsesMap[stmt] = aUses; // saving accurate un-folded uses for DCE later
                 }
             }
         }
 
-        // PASS 2: BACKWARD - Setup Block-Level Gen/Kill Sets strictly respecting ordering
+        // pass 2: (backward) - Setup of Block-Level Gen/Kill sets which strictly respect ordering
+        // figuring out exactly where variables are created (def) and used in each block
         for (CFG::iterator blockIt = functionCFG->begin(); blockIt != functionCFG->end(); ++blockIt) {
             CFGBlock *block = *blockIt;
             int blockID = block->getBlockID();
@@ -341,14 +352,15 @@ public:
                     }
                     for (const string &use : sUses) {
                         useLiveSets[blockID].insert(use);
-                        // --- NEW FIX: Log that this variable is active! ---
+                        //    Log that this variable is active with help of everUsedVars
                         everUsedVars.insert(use); 
                     }
                 }
             }
         }
 
-        // PASS 3: Fixed-Point Iteration (Dataflow Analysis)
+        // pass 3: Fixed-Point Iteration (Dataflow Analysis)
+        // Looping, kept updating the live variable sets until the math stops changing
         map<int, set<string>> inLive, outLive;
         changed = true;
         while (changed) {
@@ -373,18 +385,20 @@ public:
             }
         }
 
-        // PASS 4: BACKWARD - Statement-Level DCE & Unreachable Code Removal
+        // pass 4: (backward) - Statement-Level DCE & Unreachable Code Removal
+        // time to actually chop out the dead code based on what we found above
         for (CFG::iterator blockIt = functionCFG->begin(); blockIt != functionCFG->end(); ++blockIt) {
             CFGBlock *block = *blockIt;
             int b = block->getBlockID();
             
-            // --- THE FIX: Phase 3 Unreachable Code Removal ---
+            //    Phase 3 Unreachable Code Removal
             if (visitedBlocks.find(b) == visitedBlocks.end()) {
-                // This block is completely disconnected. Delete all its contents!
+                // This block is completely disconnected so deleting all its contents
                 for (auto elemIt = block->rbegin(); elemIt != block->rend(); ++elemIt) {
                     if (optional<CFGStmt> cfgStmt = elemIt->getAs<CFGStmt>()) {
                         const Stmt *stmt = cfgStmt->getStmt();
                         
+                        // trying to cleanly grab the semicolon too so the C code doesn't break
                         SourceRange rangeToRemove = stmt->getSourceRange();
                         SourceLocation endLoc = rangeToRemove.getEnd();
                         if (endLoc.isValid()) {
@@ -394,10 +408,10 @@ public:
                             if (charData[offset] == ';') endLoc = endLoc.getLocWithOffset(offset + 1);
                         }
                         TheRewriter.RemoveText(SourceRange(rangeToRemove.getBegin(), endLoc));
-                        llvm::outs() << "  -> [UNREACHABLE CODE REMOVED]\n";
+                        llvm::outs() << "[Unreachable Code Removed]\n";
                     }
                 }
-                continue; // Now safely skip the Live Variable Dataflow math!
+                continue; // now safely skipping the Live Variable Dataflow math
             }
 
             set<string> live = outLive[b];
@@ -412,7 +426,7 @@ public:
                     if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(stmt)) {
                         if (BO->isAssignmentOp()) {
                             string defVar = getVarName(BO->getLHS());
-                            if (!defVar.empty()) { // Guard against aliases
+                            if (!defVar.empty()) { // guard against aliases
                                 sDefs.insert(defVar);
                                 if (live.find(defVar) == live.end()) isDead = true;
                             }
@@ -425,8 +439,8 @@ public:
                                 if (!defVar.empty()) {
                                     sDefs.insert(defVar);
                                     
-                                    // --- THE FIX: Protect the Type Signature! ---
-                                    // It is only truly dead if the current value is dead AND it's never used anywhere else
+                                    //    Protecting the Type Signature
+                                    // It is only truly dead if the current value is dead and it's never used anywhere else
                                     if (live.find(defVar) != live.end() || everUsedVars.count(defVar)) {
                                         allDead = false;
                                     }
@@ -436,33 +450,33 @@ public:
                         if (allDead && !sDefs.empty()) isDead = true;
                     }
                     
-                    // --- PHASE 2/3 FIX: Protect Side Effects ---
+                    //    Protecting Side Effects 
                     if (isDead && hasSideEffects(stmt)) {
-                        isDead = false; // Never kill statements with function calls
+                        isDead = false; // prevents killing statements with function calls
                     }
                     
                     if (isDead) {
-                        // Aggressive Removal: Attempt to get the extended source range to catch semicolons
+                        // aggressive Removal: attempt to get the extended source range to catch semicolons
                         SourceRange rangeToRemove = stmt->getSourceRange();
                         
-                        // Extend the end location slightly to try and grab the semicolon
+                        // extending the end location slightly to try and grab the semicolon
                         SourceLocation endLoc = rangeToRemove.getEnd();
                         if (endLoc.isValid()) {
-                            // Find the character after the end location
+                            // find the character after the end location
                             const char* charData = TheRewriter.getSourceMgr().getCharacterData(endLoc);
                             int offset = 0;
-                            // Look ahead up to 5 chars for a semicolon
+                            // look ahead up to 5 chars for a semicolon
                             while (offset < 5 && charData[offset] != ';' && charData[offset] != '\0') {
                                 offset++;
                             }
                             if (charData[offset] == ';') {
-                                endLoc = endLoc.getLocWithOffset(offset + 1); // Include the semicolon
+                                endLoc = endLoc.getLocWithOffset(offset + 1); // include the semicolon
                             }
                         }
                         
                         TheRewriter.RemoveText(SourceRange(rangeToRemove.getBegin(), endLoc));
                         
-                        llvm::outs() << "  -> [DEAD CODE REMOVED]\n";
+                        llvm::outs() << "[Dead Code Removed]\n";
                     } else {
                         for (const string &def : sDefs) live.erase(def);
                         for (const string &use : sUses) live.insert(use);
@@ -471,7 +485,8 @@ public:
             }
         }
 
-        // --- BONUS: PASS 5 - FORWARD SECURITY TAINT ANALYSIS ---
+        // Pass 5 - Forward Security Taint Analysis
+        // security check, tracking bad input to make sure it doesn't cause damage
         map<int, set<string>> taintIn, taintOut;
         set<int> vulnerableBlocks; 
         map<int, string> vulnReasons;
@@ -484,7 +499,7 @@ public:
                 int b = block->getBlockID();
                 if (visitedBlocks.find(b) == visitedBlocks.end()) continue;
 
-                // 1. Calculate IN set (Union of predecessors' OUT sets)
+                // 1.calculating IN set (union of predecessors' OUT sets)
                 set<string> newIn;
                 for (CFGBlock::pred_iterator predIt = block->pred_begin(); predIt != block->pred_end(); ++predIt) {
                     if (CFGBlock *pred = *predIt) {
@@ -493,15 +508,16 @@ public:
                 }
                 taintIn[b] = newIn;
 
-                // 2. Process block instructions to generate OUT set
+                // 2.process block instructions to generate OUT set
                 set<string> currentTaint = newIn;
-                map<string, long long> emptyVals; // Dummy map for extractActualUses
+                map<string, long long> emptyVals; // dummy map for extractActualUses
                 
                 for (CFGBlock::iterator elemIt = block->begin(); elemIt != block->end(); ++elemIt) {
                     if (optional<CFGStmt> cfgStmt = elemIt->getAs<CFGStmt>()) {
                         const Stmt *stmt = cfgStmt->getStmt();
                         
-                        // A. Check for SOURCES (Input introduces taint)
+                        // A.checking for SOURCES (Input introduces taint)
+                        // this is where bad data sneaks in (like user input from scanf)
                         if (const CallExpr *CE = dyn_cast<CallExpr>(stmt)) {
                             if (const FunctionDecl *FD = CE->getDirectCallee()) {
                                 string fName = FD->getNameAsString();
@@ -515,8 +531,9 @@ public:
                             }
                         }
                         
-                        // B. Check for PROPAGATION
-                        // B1. Standard Assignments (y = x + 1)
+                        // B.checking for PROPAGATION
+                        // how does the bad data spread through regular math and assignments?
+                        // B1. standard assignments (y=x+1)
                         if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(stmt)) {
                             if (BO->isAssignmentOp()) {
                                 string lhs = getVarName(BO->getLHS());
@@ -537,7 +554,7 @@ public:
                                 }
                             }
                         }
-                        // B2. Declarations with Initialization (int y = x;)
+                        // B2.declarations with initialization (int y = x;)
                         else if (const DeclStmt *DS = dyn_cast<DeclStmt>(stmt)) {
                             for (auto *decl : DS->decls()) {
                                 if (VarDecl *VD = dyn_cast<VarDecl>(decl)) {
@@ -558,10 +575,11 @@ public:
                             }
                         }
                         
-                       // C. Check for SINKS (Vulnerability detected!)
+                       // C.checking for SINKS (vulnerability detected)
+                       // Where does the bad data cause damage?
                         
                         // Sink 1: Array Indexing (Buffer Overflow)
-                        // --- FIX: Deep scan the entire statement tree for array accesses ---
+                        //    Deep scan the entire statement tree for array accesses
                         queue<const Stmt*> stmtQ;
                         stmtQ.push(stmt);
                         
@@ -580,7 +598,7 @@ public:
                                 }
                             }
                             
-                            // Push all children into the queue to keep digging
+                            // pushing all children into the queue to continue digging
                             for (const Stmt *child : curr->children()) {
                                 if (child) stmtQ.push(child);
                             }
@@ -604,7 +622,7 @@ public:
                                         }
                                     }
                                 }
-                                // Format String Vulnerability (printf with tainted 0th arg)
+                                // format string Vulnerability like with printf
                                 else if (fName == "printf") {
                                     if (CE->getNumArgs() > 0) {
                                         set<string> argUses;
@@ -629,44 +647,45 @@ public:
             }
         }
 
-        // --- BONUS 1: NATURAL LOOP DETECTION ---
-        map<int, set<int>> naturalLoops; // Maps Header ID to all Block IDs in that loop
+        // Natural loop detection
+        // finding those while/for loops by looking for edges that point backward
+        map<int, set<int>> naturalLoops; // maps header ID to all block IDs in that loop
 
         for (CFG::iterator it = functionCFG->begin(); it != functionCFG->end(); ++it) {
             CFGBlock *header = *it;
             int H = header->getBlockID();
             
-            // Scan all blocks to see if any have a back-edge pointing to H
+            // scanning all blocks to see if any have a back-edge pointing to H
             for (CFG::iterator tailIt = functionCFG->begin(); tailIt != functionCFG->end(); ++tailIt) {
                 CFGBlock *tail = *tailIt;
                 int T = tail->getBlockID();
                 
-                // Check if an edge exists from T -> H
+                // checking if an edge exists from T -> H
                 bool hasEdge = false;
                 for (CFGBlock::succ_iterator succIt = tail->succ_begin(); succIt != tail->succ_end(); ++succIt) {
                     if (*succIt && (*succIt)->getBlockID() == H) { hasEdge = true; break; }
                 }
                 
-                // If T -> H is an edge, AND H dominates T, it is a guaranteed Loop Back-edge!
+                // If T -> H is an edge, AND H dominates T, it is a guaranteed Loop Back-edge
                 if (hasEdge && dominators[T].count(H)) {
                     set<int> loopBlocks;
                     loopBlocks.insert(H);
                     loopBlocks.insert(T);
                     
-                    // Traverse backwards from Tail to Header to find all blocks trapped in the loop
+                    // traverse backwards from Tail to Header to find all blocks trapped in the loop
                     if (H != T) {
-                        queue<CFGBlock*> worklist; // FIX: Store pointers, not just IDs
+                        queue<CFGBlock*> worklist; //    storing pointers, not just IDs
                         worklist.push(tail);
                         
                         while (!worklist.empty()) {
                             CFGBlock *currBlock = worklist.front(); 
                             worklist.pop();
                             
-                            // FIX: Direct predecessor traversal (Instant lookup instead of CFG-wide scan)
+                            //    direct predecessor traversal (Instant lookup instead of CFG-wide scan)
                             for (CFGBlock::pred_iterator pIt = currBlock->pred_begin(); pIt != currBlock->pred_end(); ++pIt) {
                                 if (CFGBlock *pred = *pIt) {
                                     int P = pred->getBlockID();
-                                    // If we haven't seen this block yet (and it's not the Header, which is already in the set)
+                                    // If we haven't seen this block yet (and it's not the header, which is already in the set)
                                     if (loopBlocks.find(P) == loopBlocks.end()) {
                                         loopBlocks.insert(P);
                                         worklist.push(pred); 
@@ -687,7 +706,8 @@ public:
             }
         }
 
-       // --- DOT Graph Generation (Improvements 3, 5, & 6) ---
+       // DOT Graph Generation
+       // now have to draw the pictures for Graphviz
         std::error_code EC;
         string dotFileName = funcName + "_cfg.dot"; 
         llvm::raw_fd_ostream dotFile(dotFileName, EC, llvm::sys::fs::OF_None);
@@ -695,11 +715,12 @@ public:
         if (!EC) {
             dotFile << "digraph CFG {\n";
             dotFile << "  ranksep=0.4;\n  nodesep=0.4;\n";
-            // FIX: Add width=0 and height=0 to force tight wrapping around text
+            //    adding width=0 and height=0 to force tight wrapping around text
             dotFile << "  node [fontname=\"Helvetica\", fontsize=10, margin=\"0.1,0.05\", width=0, height=0];\n";
 
-            PrintingPolicy Policy(Context->getLangOpts()); // Required for Improvement 5
+            PrintingPolicy Policy(Context->getLangOpts());
 
+            // doing the setup of node shapes and colors based on what the block actually does
             for (CFG::iterator it = functionCFG->begin(); it != functionCFG->end(); ++it) {
                 CFGBlock *block = *it;
                 int blockID = block->getBlockID();
@@ -710,7 +731,7 @@ public:
                 
                 if (block == &functionCFG->getEntry()) { shape = "ellipse"; blockType = "Entry"; fillColor = "\"#d4edda\""; } 
                 else if (block == &functionCFG->getExit()) { shape = "ellipse"; blockType = "Exit"; fillColor = "\"#d4edda\""; }
-                // --- NEW VISUALIZATION: Highlight Vulnerable Sinks ---
+                //    highlights vulnerable sinks
                 else if (vulnerableBlocks.count(blockID)) { 
                     shape = "octagon"; 
                     blockType = "SECURITY RISK"; 
@@ -734,21 +755,22 @@ public:
 
                 if (visitedBlocks.find(blockID) == visitedBlocks.end()) { blockType = "Dead Code"; fillColor = "\"#f8d7da\""; }
 
-                // --- NEW VISUALIZATION: Identify Loop Headers ---
+                //    Identifying Loop Headers
                 string penWidth = "1.0"; // Default border thickness
                 string loopLabel = "";
                 if (naturalLoops.count(blockID)) {
-                    penWidth = "3.0"; // Make the border thick!
+                    penWidth = "3.0"; // Make the border thick
                     loopLabel = "\\l[LOOP HEADER]";
                 }
 
-            // --- Extract and format actual C code for the block ---
+            // extracting and formating the actual C code for the block
+            // cleaning up the raw C code so it doesn't totally break the Graphviz parser
                 string blockCode = "";
                 for (CFGBlock::iterator elemIt = block->begin(); elemIt != block->end(); ++elemIt) {
                     if (optional<CFGStmt> cfgStmt = elemIt->getAs<CFGStmt>()) {
                         const Stmt *S = cfgStmt->getStmt();
                         
-                        // --- NEW FIX: Hide floating AST evaluation nodes (like the ghost '0;') ---
+                        // to hide floating AST evaluation nodes (like the ghost '0;') 
                         if (isa<Expr>(S) && !isa<BinaryOperator>(S) && !isa<CallExpr>(S) && !isa<UnaryOperator>(S)) {
                             continue; 
                         }
@@ -759,29 +781,29 @@ public:
                         
                         string sanitized = rso.str();
                         
-                        // 1. Erase Carriage Returns which break Graphviz completely
+                        // 1. erasing carriage returns which break Graphviz completely
                         sanitized.erase(std::remove(sanitized.begin(), sanitized.end(), '\r'), sanitized.end());
                         
-                        // 2. Safely remove leading/trailing whitespace
+                        // 2. safely removing leading/trailing whitespace
                         size_t first = sanitized.find_first_not_of(" \n\t");
                         if (first == string::npos) continue; 
                         size_t last = sanitized.find_last_not_of(" \n\t");
                         sanitized = sanitized.substr(first, (last - first + 1));
                         
                         if (!sanitized.empty()) {
-                            // --- NEW FIX: Escape literal backslashes to stop \n from breaking Graphviz! ---
+                            //    escaping literal backslashes to stop \n from breaking Graphviz
                             size_t pos = 0;
                             while ((pos = sanitized.find("\\", pos)) != string::npos) { sanitized.replace(pos, 1, "\\\\"); pos += 2; }
                             
-                            // 3. Escape quotes for Graphviz
+                            // 3.escaping quotes for Graphviz
                             pos = 0;
                             while ((pos = sanitized.find("\"", pos)) != string::npos) { sanitized.replace(pos, 1, "\\\""); pos += 2; }
                             
-                            // 4. Use standard centered newlines
+                            // 4.using standard centered newlines
                             pos = 0;
                             while ((pos = sanitized.find("\n", pos)) != string::npos) { sanitized.replace(pos, 1, "\\n"); pos += 2; }
                             
-                            // 5. Ensure statements end with a semicolon
+                            // 5.ensuring statements end with a semicolon
                             if (sanitized.back() != ';' && sanitized.back() != '}') {
                                sanitized += ";";
                             }
@@ -791,13 +813,14 @@ public:
                     }
                 }
 
-                // --- FIX: Prevent Graphviz boundary collapse by safely building the label string ---
+                //    preventing the Graphviz boundary collapse by safely building the label string
+                // building the text label for the block, showing the code and the live variables
                 string extraLabel = vulnerableBlocks.count(blockID) ? "\\n! " + vulnReasons[blockID] + " !" : "";
                 string labelStr = "[" + blockType + "] Block " + std::to_string(blockID) + extraLabel;
                 
-                // Only add the separator if there is going to be content below it
+                // only add the separator if there is going to be content below it
                 if (!blockCode.empty() || !inLive[blockID].empty() || !outLive[blockID].empty()) {
-                    labelStr += "\\n---\\n";
+                    labelStr += "\\n   \\n";
                 }
                 
                 if (!blockCode.empty()) {
@@ -826,25 +849,26 @@ public:
                     labelStr += "}\\n";
                 }
                 
-                // Strip the absolute final hanging newline to ensure the bounding box wraps perfectly
+                // stripping the absolute final hanging newline to ensure the bounding box wraps perfectly
                 if (labelStr.length() >= 2 && labelStr.substr(labelStr.length() - 2) == "\\n") {
                     labelStr = labelStr.substr(0, labelStr.length() - 2);
                 }
 
-                // Write the cleanly formatted string to the file
+                // writing the cleanly formatted string to the file
                 dotFile << "  Block" << blockID << " [shape=\"" << shape 
                         << "\", style=\"filled\", color=\"black\", fillcolor=" << fillColor 
                         << ", penwidth=" << penWidth 
                         << ", label=\"" << labelStr << "\"];\n";
                 
-            } // <--- End of the CFG iterator loop
+            } 
 
-            // --- IMPROVEMENT 6: Draw Edges with True/False Labels ---
+            //    Drawing Edges with True/False Labels
+            // drawing the arrows connecting the blocks and colour-coding the true/false branches and loop back-edges
             for (CFG::iterator it = functionCFG->begin(); it != functionCFG->end(); ++it) {
                 CFGBlock *block = *it;
                 int A = block->getBlockID();
                 
-                // Check if this block evaluates a condition
+                // checking if this block evaluates a condition
                 bool isConditional = (block->getTerminator().getStmt() != nullptr) && (block->succ_size() == 2);
                 int succIndex = 0;
 
@@ -853,7 +877,7 @@ public:
                         int B = succ->getBlockID();
                         dotFile << "  Block" << A << " -> Block" << B;
                         
-                        // Store edge attributes to prevent syntax clashes
+                        // storing edge attributes to prevent syntax clashes
                         std::vector<string> attrs;
                         
                         if (dominators[A].count(B)) {
@@ -895,16 +919,18 @@ public:
         return true; 
     }
 
+    // destroy any functions that aren't 'main' and never get called
     void RemoveUnreachableFunctions() {
         for (const FunctionDecl* FD : allFunctions) {
             string name = FD->getNameAsString();
             if (name != "main" && calledFunctions.find(name) == calledFunctions.end()) {
-                TheRewriter.ReplaceText(FD->getSourceRange(), "/* [UNREACHABLE FUNCTION REMOVED] */");
+                TheRewriter.ReplaceText(FD->getSourceRange(), "/* [Unreachable Function Removed] */");
             }
         }
     }
 };
 
+// These just hook our visitor into Clang's main parsing pipeline
 class MyASTConsumer : public ASTConsumer {
 private:
     ASTContext *Ctx;
@@ -921,6 +947,7 @@ public:
         
         Visitor.RemoveUnreachableFunctions();
         
+        // to save the newly optimized C code into a temp file
         const RewriteBuffer *RewriteBuf = TheRewriter.getRewriteBufferFor(Context.getSourceManager().getMainFileID());
         if (RewriteBuf) {
             std::error_code EC;
@@ -940,6 +967,7 @@ public:
     }
 };
 
+// The standard entry point to fire up the Clang tool
 int main(int argc, const char **argv) {
     auto ExpectedParser = CommonOptionsParser::create(argc, argv, MyToolCategory);
     if (!ExpectedParser) { llvm::errs() << ExpectedParser.takeError(); return 1; }
