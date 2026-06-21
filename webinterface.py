@@ -22,7 +22,7 @@ with st.sidebar:
     st.title("Control Panel")
     
     # A nice highlighted info box telling others how to run it
-    st.info("**Press the PLAY BUTTON inside the code editor to run the passes!**", icon="▶️")
+    st.info("**Press the PLAY BUTTON inside the code editor to run the passes!**")
     
     st.markdown("---")
     st.subheader("Graph Selectors")
@@ -169,13 +169,13 @@ with col2:
                 except Exception as e:
                     # Catching Python-side crashes
                     st.error(f"An execution error occurred: {e}")
-                    with st.expander("🚨 View Python Error", expanded=True):
+                    with st.expander("View Python Error", expanded=True):
                         st.text(str(e))
 
     # Render Block
     # UI components are drawn using the data saved in session_state
     if st.session_state.analysis_done:
-        tab1, tab2, tab3 = st.tabs(["🔍 Original CFG", "✨ Optimized CFG", "📝 Optimized Code"])
+        tab1, tab2, tab3 = st.tabs(["Original CFG", "Optimized CFG", "Optimized Code"])
         
         with tab1:
             if st.session_state.orig_graphs:
